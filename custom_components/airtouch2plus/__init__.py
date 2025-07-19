@@ -1,6 +1,21 @@
 """The airtouch2 integration."""
 from __future__ import annotations
 
+# Development override - use local airtouch2 library instead of pip version
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+# Simple verification
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+import airtouch2
+
+_LOGGER.info(f"Using airtouch2 from: {airtouch2.__file__}")
+
+
 from airtouch2.at2plus import At2PlusClient
 
 from homeassistant.config_entries import ConfigEntry
