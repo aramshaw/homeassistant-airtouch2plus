@@ -1,6 +1,13 @@
 """The airtouch2 integration."""
 from __future__ import annotations
 
+# Use the airtouch2 library bundled in this integration (no pip/git needed at
+# install time). This must run before importing airtouch2.
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(__file__))
+
 from airtouch2.at2plus import At2PlusClient
 
 from homeassistant.config_entries import ConfigEntry
