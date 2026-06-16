@@ -54,11 +54,19 @@ class AirTouch2PlusGroupEntity(FanEntity):
             model="Airtouch 2+",
         )
 
+    @property
+    def available(self) -> bool:
+        """Return False while the controller connection is down."""
+        return self._group._client.connected
+
     async def async_added_to_hass(self) -> None:
         """Call when entity is added."""
         # Add callback for when group receives new data.
         # Removes callback on remove.
         self.async_on_remove(self._group.add_callback(self.async_write_ha_state))
+        self.async_on_remove(
+            self._group._client.add_connection_callback(self.async_write_ha_state)
+        )
 
     #
     # FanEntity overrides

@@ -3,9 +3,13 @@ import errno
 import logging
 import socket
 from typing import Callable
-from airtouch2.common.interfaces import CoroCallback, Serializable, TaskCreator
+from airtouch2.common.interfaces import Callback, CoroCallback, Serializable, TaskCreator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Cap connection attempts so a stalled connect (controller hung / not answering
+# SYN) fails fast and we retry, rather than blocking on the OS timeout (~1-2 min).
+CONNECT_TIMEOUT_SECONDS = 10
 
 NetworkOrHostDownErrors = (errno.EHOSTUNREACH, errno.ECONNREFUSED,  errno.ETIMEDOUT,
                            errno.ENETDOWN, errno.ENETUNREACH, errno.ENETRESET, errno.ECONNABORTED)
@@ -32,7 +36,7 @@ class NetClient:
     """A generic network client"""
 
     def __init__(self, host: str, port: int, on_connect: CoroCallback, handle_message: CoroCallback,
-                 task_creator: TaskCreator = asyncio.create_task):
+                 task_creator: TaskCreator = asyncio.create_task, on_disconnect: Callback | None = None):
         # network
         self._host_ip: str = host
         self._host_port: int = port
@@ -46,12 +50,19 @@ class NetClient:
 
         self._on_connect = on_connect
         self._handle_message = handle_message
+        self._on_disconnect = on_disconnect
 
     async def connect(self) -> bool:
         """Opens connection to the server, returns True/False if successful/unsuccessful"""
         _LOGGER.debug(f"Connecting to {self._host_ip} on port {self._host_port}")
         try:
-            self._reader, self._writer = await asyncio.open_connection(self._host_ip, self._host_port)
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(self._host_ip, self._host_port),
+                timeout=CONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning(f"Timed out connecting to {self._host_ip}:{self._host_port}")
+            return False
         except OSError as e:
             _LOGGER.warning(f"Could not connect to host {self._host_ip}")
             if isinstance(e, socket.gaierror):
@@ -134,10 +145,13 @@ class NetClient:
             await self._handle_message()
 
     async def _try_reconnect(self) -> None:
+        if self._on_disconnect is not None:
+            self._on_disconnect()
         retries = 0
         while not await self.connect():
             await asyncio.sleep(0.001 * (10**retries) if retries < 4 else 10)
             retries += 1
-            if not retries % 60 or retries == 4:
-                _LOGGER.info("Server is not responding, will continue trying to reconnect every 10s")
+            if not retries % 6 or retries == 4:
+                _LOGGER.warning(
+                    f"Controller {self._host_ip} not responding ({retries} attempts); still retrying")
         _LOGGER.info("Reconnected")

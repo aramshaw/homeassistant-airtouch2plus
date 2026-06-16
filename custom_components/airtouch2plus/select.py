@@ -58,7 +58,7 @@ class AirTouch2PlusFavouriteSelect(SelectEntity):
 
     @property
     def available(self) -> bool:
-        return len(self._client.favourites) > 0
+        return self._client.connected and len(self._client.favourites) > 0
 
     async def async_select_option(self, option: str) -> None:
         favourite = next(
@@ -72,4 +72,7 @@ class AirTouch2PlusFavouriteSelect(SelectEntity):
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
             self._client.add_favourite_callback(self.async_write_ha_state)
+        )
+        self.async_on_remove(
+            self._client.add_connection_callback(self.async_write_ha_state)
         )

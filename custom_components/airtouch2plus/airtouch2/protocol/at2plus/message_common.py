@@ -78,7 +78,13 @@ class Header(Serializable):
             _LOGGER.warning(
                 f"Unknown message type in header ({hex(header_bytes[CommonMessageOffsets.MESSAGE_TYPE])})", exc_info=e)
             type = MessageType.UNSET
-        address_src = AddressSource(header_bytes[CommonMessageOffsets.ADDRESS])
+        try:
+            address_src = AddressSource(header_bytes[CommonMessageOffsets.ADDRESS])
+        except ValueError:
+            # The source byte is informational and is not used to build the Header.
+            # Some frames (e.g. the favourite-activation ack) carry an undocumented
+            # source value (0xFD); tolerate it rather than rejecting the whole frame.
+            address_src = None
         address_msg_type = AddressMsgType(header_bytes[CommonMessageOffsets.ADDRESS+1])
         if type == MessageType.CONTROL_STATUS:
             if (address_msg_type != AddressMsgType.NORMAL):

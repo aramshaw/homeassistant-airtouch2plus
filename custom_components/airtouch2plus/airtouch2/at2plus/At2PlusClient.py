@@ -40,9 +40,13 @@ class At2PlusClient:
         self.console_temperatures: dict[int, float] = {}
         self.favourites: list[Favourite] = []
         self.active_favourite_id: int | None = None
+        self.connected: bool = False
 
         # private
-        self._client = NetClient(host, 9200, self._on_connect, self.handle_one_message, task_creator)
+        self._client = NetClient(
+            host, 9200, self._on_connect, self.handle_one_message, task_creator,
+            on_disconnect=self._on_disconnect,
+        )
         self._dump_responses = dump_responses
         self._task_creator = task_creator
         self._new_ac_callbacks: list[Callback] = []
@@ -51,6 +55,7 @@ class At2PlusClient:
         self._new_group_callbacks: list[Callback] = []
         self._console_temperature_callbacks: list[Callback] = []
         self._favourite_callbacks: list[Callback] = []
+        self._connection_callbacks: list[Callback] = []
 
         self.add_new_ac_callback(lambda: self._found_ac.set())
 
@@ -99,6 +104,16 @@ class At2PlusClient:
         def remove_callback() -> None:
             if callback in self._favourite_callbacks:
                 self._favourite_callbacks.remove(callback)
+
+        return remove_callback
+
+    def add_connection_callback(self, callback: Callback):
+        """Register a callback fired whenever the connected state changes."""
+        self._connection_callbacks.append(callback)
+
+        def remove_callback() -> None:
+            if callback in self._connection_callbacks:
+                self._connection_callbacks.remove(callback)
 
         return remove_callback
 
@@ -192,6 +207,16 @@ class At2PlusClient:
         for callback in self._favourite_callbacks:
             callback()
 
+    def _set_connected(self, connected: bool) -> None:
+        if connected != self.connected:
+            self.connected = connected
+            for callback in self._connection_callbacks:
+                callback()
+
+    def _on_disconnect(self) -> None:
+        # Called by NetClient when the connection is lost (before it reconnects).
+        self._set_connected(False)
+
     async def _read_magic(self) -> bytes:
         """Search for the two header magic bytes"""
         while True:  # exit via return on successful read of header magic
@@ -252,6 +277,7 @@ class At2PlusClient:
         return Message(header, buffer)
 
     async def _on_connect(self) -> None:
+        self._set_connected(True)
         # request groups
         await self._client.send(GroupStatusMessage([]))
         # request ACs
