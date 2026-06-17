@@ -14,24 +14,6 @@ CONNECT_TIMEOUT_SECONDS = 10
 NetworkOrHostDownErrors = (errno.EHOSTUNREACH, errno.ECONNREFUSED,  errno.ETIMEDOUT,
                            errno.ENETDOWN, errno.ENETUNREACH, errno.ENETRESET, errno.ECONNABORTED)
 
-def _set_keepalive_options(
-    sock: socket.socket, idle_seconds: int, interval_seconds: int, count: int
-):
-    if hasattr(sock, "SO_KEEPALIVE"):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    if hasattr(sock, "TCP_KEEPIDLE"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle_seconds)
-    if hasattr(socket, "TCP_KEEPINTVL"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval_seconds)
-    if hasattr(socket, "TCP_KEEPCNT"):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, count)
-    if hasattr(socket, "TCP_USER_TIMEOUT"):
-        sock.setsockopt(
-            socket.IPPROTO_TCP,
-            socket.TCP_USER_TIMEOUT,
-            1000 * (idle_seconds + (interval_seconds * count)),
-        )
-
 class NetClient:
     """A generic network client"""
 
@@ -72,12 +54,10 @@ class NetClient:
                 raise e
             return False
         else:
-            _set_keepalive_options(
-                self._writer.get_extra_info("socket"),
-                idle_seconds=5,
-                interval_seconds=1,
-                count=5,
-            )
+            # No socket keepalive: the long-reliable original set no socket options.
+            # An aggressive keepalive (5s idle / 10s user-timeout) was added from
+            # upstream and is the prime suspect for coinciding with the controller's
+            # network stack hanging overnight, so it is removed pending an A/B test.
             await self._on_connect()
             return True
 
