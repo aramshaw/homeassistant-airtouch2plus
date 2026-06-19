@@ -31,6 +31,11 @@ _LOGGER = logging.getLogger(__name__)
 # also be accepted for these messages has not been verified.
 CONTROL_STATUS_REPLY_ADDRESS = 0xC0
 
+# The controller resets the TCP session after ~16 min of silence (it stops
+# broadcasting overnight when nothing changes). A periodic lightweight status
+# request keeps the session active. See docs/controller-investigation.md.
+POLL_INTERVAL_SECONDS = 240
+
 
 class At2PlusClient:
     def __init__(self, host: str, dump_responses: bool = False, task_creator: TaskCreator = asyncio.create_task):
@@ -49,6 +54,7 @@ class At2PlusClient:
         )
         self._dump_responses = dump_responses
         self._task_creator = task_creator
+        self._poll_task: asyncio.Task[None] | None = None
         self._new_ac_callbacks: list[Callback] = []
         self._ability_message_queue: asyncio.Queue[AcAbilityMessage] = asyncio.Queue()
         self._found_ac = asyncio.Event()
@@ -64,11 +70,15 @@ class At2PlusClient:
 
     def run(self) -> None:
         self._client.run()
+        self._poll_task = self._task_creator(self._poll_loop())
 
     async def wait_for_ac(self, timeout: int = 5) -> None:
         await asyncio.wait_for(self._found_ac.wait(), timeout)
 
     async def stop(self) -> None:
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            self._poll_task = None
         await self._client.stop()
 
     def add_new_ac_callback(self, callback: Callback):
@@ -124,6 +134,28 @@ class At2PlusClient:
         """Activate a favourite (scene) by id. The controller actuates the
         favourite's zones and broadcasts an updated favourite status."""
         await self._client.send(FavouriteControlMessage(favourite_id))
+
+    async def _send_keepalive_poll(self) -> None:
+        """Send a lightweight status request to keep the TCP session active.
+
+        The controller resets the socket after ~16 min of silence (it stops
+        broadcasting overnight when nothing changes), so a periodic request
+        keeps traffic flowing. Best-effort: skipped while disconnected, and
+        swallows transient send errors during reconnection.
+        See docs/controller-investigation.md.
+        """
+        if not self.connected:
+            return
+        try:
+            await self._client.send(AcStatusMessage([]))
+            _LOGGER.debug("Sent keep-alive status poll")
+        except Exception as e:
+            _LOGGER.debug(f"Keep-alive poll failed (likely reconnecting): {e}")
+
+    async def _poll_loop(self) -> None:
+        while True:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            await self._send_keepalive_poll()
 
     async def handle_one_message(self) -> None:
         message = await self._read_message()
