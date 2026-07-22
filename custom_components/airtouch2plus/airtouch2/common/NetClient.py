@@ -14,6 +14,20 @@ CONNECT_TIMEOUT_SECONDS = 10
 NetworkOrHostDownErrors = (errno.EHOSTUNREACH, errno.ECONNREFUSED,  errno.ETIMEDOUT,
                            errno.ENETDOWN, errno.ENETUNREACH, errno.ENETRESET, errno.ECONNABORTED)
 
+
+def _format_exception(e: Exception):
+    return f"{type(e).__name__}: {e}"
+
+
+def _log_completed_task_exception(task: asyncio.Task) -> None:
+    try:
+        _ = task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        _LOGGER.error(f"{task.get_name()} completed with an exception:\n{_format_exception(e)}")
+
+
 class NetClient:
     """A generic network client"""
 
@@ -64,19 +78,24 @@ class NetClient:
     def run(self) -> None:
         """Starts the processing of incoming information from the server"""
         _LOGGER.debug("Starting listener task")
-        self._main_loop_task = self._task_creator(self._main())
+        self._stop = False
+        self._main_loop_task = self._task_creator(self._main(), name="Main loop task")
+        # This task typically has no awaiter but it's possible it completes
+        # with an exception, so add a done callback that logs exceptions —
+        # a silently-dead read loop is how the zombie-client bug hid.
+        assert self._main_loop_task is not None
+        self._main_loop_task.add_done_callback(_log_completed_task_exception)
 
     async def stop(self) -> None:
         """Stops the processing of incoming information from the server"""
-        if not self._main_loop_task:
-            raise RuntimeError("Client task is not running")
         self._stop = True
-        self._main_loop_task.cancel()
-        try:
-            await self._main_loop_task
-        except asyncio.CancelledError as e:
-            # Eat the expected exception
-            pass
+        if self._main_loop_task is not None:
+            self._main_loop_task.cancel()
+            try:
+                await self._main_loop_task
+            except asyncio.CancelledError:
+                # Eat the expected exception
+                pass
 
     async def send(self, message: Serializable) -> None:
         """Send the serializable 'message'"""
