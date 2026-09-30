@@ -9,6 +9,7 @@ from .conversions import (
 )
 from .const import DOMAIN
 
+import logging
 from typing import final
 
 from homeassistant.components.climate import (
@@ -19,7 +20,17 @@ from homeassistant.components.climate import (
     ATTR_TEMPERATURE,
     PRECISION_WHOLE
 )
+from homeassistant.core import CALLBACK_TYPE
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.event import async_call_later
+
+_LOGGER = logging.getLogger(__name__)
+
+# The console normally echoes a set-point change within ~0.2 s and broadcasts
+# status every few seconds. It has no application-level ACK, so confirm the
+# change by watching for the echo and re-send once before giving up.
+_PendingConfirmTimeoutSec = 5.0
+_MaxConfirmAttempts = 2
 
 
 @final
@@ -43,6 +54,12 @@ class Airtouch2PlusClimateEntity(ClimateEntity):
     def __init__(self, at2plus_aircon: At2PlusAircon) -> None:
         """Initialize the climate device."""
         self._ac = at2plus_aircon
+        # Unconfirmed (optimistic) target temperature from the last local
+        # set_temperature call. Cleared when the console echoes it, or
+        # reverted when confirmation times out.
+        self._pending_setpoint: float | None = None
+        self._pending_attempts: int = 0
+        self._pending_timer: CALLBACK_TYPE | None = None
 
     #
     # Entity overrides:
@@ -80,10 +97,14 @@ class Airtouch2PlusClimateEntity(ClimateEntity):
         """Call when entity is added."""
         # Add callback for when aircon receives new data
         # Removes callback on remove
-        self.async_on_remove(self._ac.add_callback(self.async_write_ha_state))
+        self.async_on_remove(self._ac.add_callback(self._handle_ac_update))
         self.async_on_remove(
             self._ac._client.add_connection_callback(self.async_write_ha_state)
         )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Call when entity is removed."""
+        self._cancel_pending_timer()
 
     #
     # ClimateEntity overrides:
@@ -117,6 +138,8 @@ class Airtouch2PlusClimateEntity(ClimateEntity):
     @property
     def target_temperature(self) -> float:
         """Return the temperature we try to reach."""
+        if self._pending_setpoint is not None:
+            return self._pending_setpoint
         if self._ac.status.set_point is not None:
             return self._ac.status.set_point
         else:
@@ -137,6 +160,7 @@ class Airtouch2PlusClimateEntity(ClimateEntity):
     async def async_set_temperature(self, **kwargs) -> None:
         """Set new target temperature."""
         temp = float(kwargs.get(ATTR_TEMPERATURE, 0))
+        self._set_pending_setpoint(temp, attempts=1)
         await self._ac.set_setpoint(temp)
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
@@ -175,3 +199,65 @@ class Airtouch2PlusClimateEntity(ClimateEntity):
             return ClimateEntityFeature.FAN_MODE
 
         return ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
+
+    #
+    # Pending-setpoint confirmation
+    #
+
+    def _handle_ac_update(self) -> None:
+        """Handle a console status update; confirm any pending set-point."""
+        if (
+            self._pending_setpoint is not None
+            and self._ac.status.set_point == self._pending_setpoint
+        ):
+            self._clear_pending_setpoint()
+        self.async_write_ha_state()
+
+    def _set_pending_setpoint(self, value: float, attempts: int) -> None:
+        """Record an unconfirmed target temperature and start its timer."""
+        self._pending_setpoint = value
+        self._pending_attempts = attempts
+        self._cancel_pending_timer()
+        self._pending_timer = async_call_later(
+            self.hass, _PendingConfirmTimeoutSec, self._handle_confirm_timeout
+        )
+        self.async_write_ha_state()
+
+    async def _handle_confirm_timeout(self, _now=None) -> None:
+        """Console did not echo the pending set-point in time: retry or revert."""
+        value = self._pending_setpoint
+        self._pending_timer = None
+        if value is None:
+            return
+        if self._pending_attempts < _MaxConfirmAttempts:
+            _LOGGER.debug(
+                "Set-point %s not confirmed after %.1fs (attempt %d); re-sending",
+                value, _PendingConfirmTimeoutSec, self._pending_attempts
+            )
+            try:
+                await self._ac.set_setpoint(value)
+            except Exception:
+                _LOGGER.warning("Retrying set-point %s failed", value, exc_info=True)
+                self._clear_pending_setpoint()
+                self.async_write_ha_state()
+                return
+            self._set_pending_setpoint(value, self._pending_attempts + 1)
+        else:
+            _LOGGER.warning(
+                "Console never confirmed set-point %s; reverting to controller value %s",
+                value, self._ac.status.set_point
+            )
+            self._clear_pending_setpoint()
+            self.async_write_ha_state()
+
+    def _clear_pending_setpoint(self) -> None:
+        """Drop the pending set-point and its timer."""
+        self._pending_setpoint = None
+        self._pending_attempts = 0
+        self._cancel_pending_timer()
+
+    def _cancel_pending_timer(self) -> None:
+        """Cancel the confirmation timer if running."""
+        if self._pending_timer is not None:
+            self._pending_timer()
+            self._pending_timer = None
