@@ -10,8 +10,9 @@ from airtouch2.protocol.at2plus.control_status_common import ControlStatusSubHea
 # console temperatures.)
 CONSOLE_SENSOR_IDS = (0x90, 0x91)
 _NO_READING = 0x07FF
-# temperature_celsius = (raw_16bit - 512) / 10
-_TEMP_OFFSET = 512
+# temperature_celsius = (raw_16bit - 500) / 10, the same encoding as AC status.
+# (512 was used until 2026-11-14 and read 1.2C low; see aramshaw/airtouch2-python#8.)
+_TEMP_OFFSET = 500
 
 
 @dataclass
